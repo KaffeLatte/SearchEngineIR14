@@ -1,0 +1,437 @@
+/*  
+ *   This file is part of the computer assignment for the
+ *   Information Retrieval course at KTH.
+ * 
+ *   First version:  Johan Boye, 2010
+ *   Second version: Johan Boye, 2012
+ *   Additions: Hedvig Kjellström, 2012-14
+ */
+
+package ir;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+
+/**
+ * Implements an inverted index as a Hashtable from words to PostingsLists.
+ */
+public class HashedIndex implements Index {
+
+	/** The index as a hashtable. */
+	private HashMap<String, PostingsList> index = new HashMap<String, PostingsList>();
+	private HashMap<Integer, Double> pageRanks;
+	private PostingsList scoresToClear = new PostingsList();
+
+	// Strängen under måste sluta på '/'
+	String directoryPath = "/tmp/eaalto/savedIndex/";
+
+	/**
+	 * Inserts this token in the index.
+	 */
+	@Override
+	public void insert(String token, int docID, int offset) {
+		//
+		// YOUR CODE HERE
+		//
+
+		PostingsEntry myPostingsEntry = new PostingsEntry(docID, offset);
+		PostingsList myPostingsList;
+
+		if (index.containsKey(token)) {
+			myPostingsList = index.get(token);
+			myPostingsList.insert(myPostingsEntry);
+		} else {
+			myPostingsList = new PostingsList(myPostingsEntry);
+			index.put(token, myPostingsList);
+		}
+	}
+
+	/**
+	 * Returns all the words in the index.
+	 */
+	@Override
+	public Iterator<String> getDictionary() {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+		return index.keySet().iterator();
+	}
+
+	/**
+	 * Returns the postings for a specific term, or null if the term is not in
+	 * the index.
+	 */
+	@Override
+	public PostingsList getPostings(String token) {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+
+		return index.get(token);
+	}
+
+	/**
+	 * Searches the index for postings matching the query.
+	 */
+	@Override
+	public PostingsList search(Query query, int queryType, int rankingType,
+			int structureType) {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+
+		// long startTime = System.nanoTime();
+		//
+		// System.out.println("------------------");
+		// System.out.println("# of unique elements in index " + index.size());
+		// System.out.println("------------------");
+
+		if (scoresToClear != null) {
+			for (int i = 0; i < scoresToClear.size(); i++) {
+				scoresToClear.get(i).clearScore();
+			}
+			scoresToClear = new PostingsList();
+		}
+
+		return Query(query, queryType, rankingType);
+	}
+
+	private PostingsList Query(Query query, int queryType, int rankingType) {
+
+		// Gör om queries till en länkad lista med strängar
+		LinkedList<String> queries = query.terms;
+		// Skapa en ArrayList med alla träffar
+		ArrayList<PostingsList> queryResponses = new ArrayList<PostingsList>();
+		for (String s : queries) {
+			PostingsList tmpList = getPostings(s);
+			if (tmpList == null) {
+				getPostingsListFromFile(s);
+				tmpList = getPostings(s);
+			}
+
+			queryResponses.add(tmpList);
+		}
+
+		PostingsList answer = queryResponses.get(0);
+		queryResponses.remove(0);
+
+		double queryTfIdf = getTfIdf(1, answer.size(), query.size());
+
+		if (queryType == 2) {
+			for (int i = 0; i < answer.size(); i++) {
+				PostingsEntry pE = answer.get(i);
+				int len = docLengths.get(Integer.toString(pE.docID));
+				double docTfIdf = getTfIdf(pE.getTf(), answer.size(), len);
+				pE.addValueToScore(queryTfIdf * docTfIdf);
+			}
+		}
+
+		Integer distance = 1;
+
+		while (queryResponses.size() != 0) {
+			PostingsList listToAddToAnswer = queryResponses.get(0);
+			queryResponses.remove(0);
+
+			if (queryType == 0) {
+				answer = intersect(answer, listToAddToAnswer);
+			}
+			if (queryType == 1) {
+				answer = positionalIntersect(answer, listToAddToAnswer,
+						distance);
+				distance++;
+			}
+			if (queryType == 2) {
+				queryTfIdf = getTfIdf(1, listToAddToAnswer.size(), query.size());
+				answer = unionIntersect(answer, listToAddToAnswer, queryTfIdf);
+			}
+
+		}
+
+		if (queryType == 2) {
+			// for (int i = 0; i < answer.size(); i++) {
+			// PostingsEntry pE = answer.get(i);
+			// pE.setScore(pE.score
+			// / docLengths.get(Integer.toString(pE.docID)));
+			// }
+			answer.sort();
+
+		}
+
+		if (rankingType == 1) {
+			if (pageRanks == null) {
+				getPageRanksFromFile();
+			}
+
+			for (int i = 0; i < answer.size(); i++) {
+				PostingsEntry pE = answer.get(i);
+				pE.clearScore();
+				pE.addValueToScore(pageRanks.get(pE.docID));
+			}
+
+			answer.sort();
+		}
+
+		if (rankingType == 2) {
+			if (pageRanks == null) {
+				getPageRanksFromFile();
+			}
+
+			for (int i = 0; i < answer.size(); i++) {
+				double pageRankWeight = 0.75;
+				double tfIdfWeight = 0.25;
+
+				PostingsEntry pE = answer.get(i);
+				pE.setScore(pE.getScore() * tfIdfWeight);
+				pE.addValueToScore(pageRanks.get(pE.docID) * pageRankWeight);
+			}
+
+			answer.sort();
+		}
+
+		scoresToClear = answer;
+
+		// if (queryType == 2) {
+		// queryResponses.add(0, answer);
+		// answer = unionIntersect(queryResponses);
+		// }
+
+		return answer;
+	}
+
+	// private PostingsList unionIntersect(ArrayList<PostingsList>
+	// queryResponses) {
+	//
+	// PostingsEntry[] scores = new PostingsEntry[docLengths.size()];
+	//
+	// double score;
+	// for (int i = 0; i < queryResponses.size(); i++) {
+	// for (int j = 0; j < queryResponses.get(i).size(); j++) {
+	// PostingsEntry pE = queryResponses.get(i).get(j);
+	// if (scores[pE.docID] == null) {
+	// scores[pE.docID] = pE;
+	// }
+	// score = getTfIdf(pE.getTf(), queryResponses.get(i).size(),
+	// docLengths.get(Integer.toString(pE.docID)));
+	// scores[pE.docID].addValueToScore(score);
+	// }
+	// }
+	//
+	// PostingsList answerXX = new PostingsList();
+	// for (int i = 0; i < scores.length; i++) {
+	// if (scores[i] != null) {
+	// scores[i].setScore(scores[i].getScore()
+	// / docLengths.get(Integer.toString(i)));
+	// answerXX.add(scores[i]);
+	// }
+	// }
+	//
+	// return answerXX;
+	//
+	// }
+
+	private PostingsList unionIntersect(PostingsList p1, PostingsList p2,
+			double queryTfIdf) {
+		PostingsList toIntersect = new PostingsList();
+
+		int p1index = 0;
+		int p2index = 0;
+
+		PostingsEntry tmp1;
+		PostingsEntry tmp2;
+
+		double p2TfIdf;
+
+		while (p1index < p1.size() && p2index < p2.size()) {
+			tmp1 = p1.get(p1index);
+			tmp2 = p2.get(p2index);
+
+			p2TfIdf = getTfIdf(tmp2.getTf(), p2.size(),
+					docLengths.get(Integer.toString(tmp2.docID)));
+
+			if (tmp1.docID == tmp2.docID) {
+				tmp1.addValueToScore(p2TfIdf * queryTfIdf);
+				p1index++;
+				p2index++;
+			} else {
+				if (tmp1.docID < tmp2.docID) {
+					p1index++;
+				} else {
+					tmp2.addValueToScore(p2TfIdf * queryTfIdf);
+					toIntersect.add(tmp2);
+					p2index++;
+				}
+			}
+
+		}
+
+		for (int i = 0; i < p1.size(); i++) {
+			toIntersect.add(p1.get(i));
+		}
+
+		return toIntersect;
+
+	}
+
+	private PostingsList positionalIntersect(PostingsList p1, PostingsList p2,
+			int distance) {
+		PostingsList intersectedList = new PostingsList();
+
+		int p1index = 0;
+		int p2index = 0;
+
+		PostingsEntry tmp1;
+		PostingsEntry tmp2;
+
+		while (p1index < p1.size() && p2index < p2.size()) {
+
+			tmp1 = p1.get(p1index);
+			tmp2 = p2.get(p2index);
+
+			if (tmp1.docID == tmp2.docID) {
+				LinkedList<Integer> p1Offsets = tmp1.getOffsets();
+				LinkedList<Integer> p2Offsets = tmp2.getOffsets();
+
+				outerloop: for (int i = 0; i < p1Offsets.size(); i++) {
+					for (int j = 0; j < p2Offsets.size(); j++) {
+						if (p2Offsets.get(j) - p1Offsets.get(i) == distance) {
+							intersectedList.insert(tmp1);
+							break outerloop;
+						}
+					}
+				}
+				p1index++;
+				p2index++;
+
+			} else {
+				if (tmp1.docID < tmp2.docID) {
+					p1index++;
+				} else {
+					p2index++;
+				}
+			}
+
+		}
+		return intersectedList;
+	}
+
+	private PostingsList intersect(PostingsList p1, PostingsList p2) {
+
+		PostingsList intersectedList = new PostingsList();
+
+		int p1index = 0;
+		int p2index = 0;
+
+		while (p1index < p1.size() && p2index < p2.size()) {
+			PostingsEntry tmp1 = p1.get(p1index);
+			PostingsEntry tmp2 = p2.get(p2index);
+
+			if (tmp1.docID == tmp2.docID) {
+				intersectedList.insert(tmp1);
+				p1index++;
+				p2index++;
+			} else {
+				if (p1.get(p1index).docID < p2.get(p2index).docID) {
+					p1index++;
+				} else {
+					p2index++;
+				}
+
+			}
+		}
+
+		return intersectedList;
+	}
+
+	private double getTfIdf(double tf, double df, double len) {
+		double idf = 0;
+		double tfIdf = 0;
+
+		idf = Math.log(docLengths.size() / df);
+		tfIdf = tf * idf / len;
+
+		return tfIdf;
+	}
+
+	private void getPageRanksFromFile() {
+		File file = new File(
+				"/afs/nada.kth.se/home/3/u1qvl923/ir/labb2/pageRanks/pageRankAllLinks");
+		System.out.println("Före try!");
+		try {
+			FileInputStream f = new FileInputStream(file);
+			ObjectInputStream s = new ObjectInputStream(f);
+			pageRanks = (HashMap<Integer, Double>) s.readObject();
+			s.close();
+			System.out.println("End of try");
+		} catch (FileNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+
+	}
+
+	private void getPostingsListFromFile(String token) {
+		String firstLetterOfToken = String.valueOf(token.charAt(0));
+		try {
+			FileInputStream fis = new FileInputStream(directoryPath
+					+ firstLetterOfToken + "/" + token);
+			ObjectInputStream ois = new ObjectInputStream(fis);
+			PostingsList injectIntoHashMap = (PostingsList) ois.readObject();
+			index.put(token, injectIntoHashMap);
+		} catch (FileNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+
+	/**
+	 * No need for cleanup in a HashedIndex.
+	 */
+	@Override
+	public void cleanup() {
+		for (String key : index.keySet()) {
+			try {
+				if (key.length() < 1) {
+					continue;
+				}
+				String newDirectoryName = String.valueOf(key.charAt(0));
+				new File(directoryPath + newDirectoryName).mkdir();
+
+				FileOutputStream fout = new FileOutputStream(directoryPath
+						+ newDirectoryName + "/" + key);
+				ObjectOutputStream oos = new ObjectOutputStream(fout);
+				oos.writeObject(getPostings(key));
+				fout.close();
+				oos.close();
+			} catch (FileNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+
+}
+

@@ -1,0 +1,322 @@
+/*  
+ *   This file is part of the computer assignment for the
+ *   Information Retrieval course at KTH.
+ * 
+ *   First version:  Johan Boye, 2010
+ *   Second version: Johan Boye, 2012
+ *   Additions: Hedvig Kjellström, 2012-14
+ */
+
+package ir;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+
+/**
+ * Implements an inverted index as a Hashtable from words to PostingsLists.
+ */
+public class HashedIndex implements Index {
+
+	/** The index as a hashtable. */
+	private HashMap<String, PostingsList> index = new HashMap<String, PostingsList>();
+	private HashMap<String, Integer> docLengths = new HashMap<String, Integer>();
+	private ArrayList<Double> queryVector = new ArrayList<Double>();
+
+	// Strängen under måste sluta på '/'
+	String directoryPath = "/tmp/eaalto/savedIndex/";
+	int totalNumberOfDocuments = 0;
+	int docLengthCounter = 0;
+	int oldDocID = -1;
+
+	/**
+	 * Inserts this token in the index.
+	 */
+	@Override
+	public void insert(String token, int docID, int offset) {
+		//
+		// YOUR CODE HERE
+		//
+		docCount(token, docID);
+
+		PostingsEntry myPostingsEntry = new PostingsEntry(docID, offset);
+		PostingsList myPostingsList;
+
+		if (index.containsKey(token)) {
+			myPostingsList = index.get(token);
+			myPostingsList.insert(myPostingsEntry);
+		} else {
+			myPostingsList = new PostingsList(myPostingsEntry);
+			index.put(token, myPostingsList);
+		}
+	}
+
+	private void docCount(String token, int docID) {
+
+		if (oldDocID == -1) {
+			oldDocID = docID;
+			docLengthCounter++;
+			totalNumberOfDocuments++;
+		}
+
+		if (oldDocID == docID) {
+			docLengthCounter++;
+		} else {
+			docLengths.put(Integer.toString(oldDocID), docLengthCounter);
+			oldDocID = docID;
+			docLengthCounter = 1;
+			totalNumberOfDocuments++;
+		}
+	}
+
+	/**
+	 * Returns all the words in the index.
+	 */
+	@Override
+	public Iterator<String> getDictionary() {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+		return index.keySet().iterator();
+	}
+
+	/**
+	 * Returns the postings for a specific term, or null if the term is not in
+	 * the index.
+	 */
+	@Override
+	public PostingsList getPostings(String token) {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+
+		return index.get(token);
+	}
+
+	/**
+	 * Searches the index for postings matching the query.
+	 */
+	@Override
+	public PostingsList search(Query query, int queryType, int rankingType,
+			int structureType) {
+		//
+		// REPLACE THE STATEMENT BELOW WITH YOUR CODE
+		//
+
+		// long startTime = System.nanoTime();
+		//
+		// System.out.println("------------------");
+		// System.out.println("# of unique elements in index " + index.size());
+		// System.out.println("------------------");
+
+		return Query(query, queryType, rankingType);
+	}
+
+	private PostingsList Query(Query query, int queryType, int rankingType) {
+
+		// Gör om queries till en länkad lista med strängar
+		LinkedList<String> queries = query.terms;
+
+		// Skapa en ArrayList med alla träffar
+		ArrayList<PostingsList> queryResponses = new ArrayList<PostingsList>();
+		for (String s : queries) {
+			PostingsList tmpList = getPostings(s);
+			if (tmpList == null) {
+				getPostingsListFromFile(s);
+				tmpList = getPostings(s);
+			}
+
+			queryResponses.add(tmpList);
+		}
+
+		PostingsList answer = queryResponses.get(0);
+		queryResponses.remove(0);
+
+		if (rankingType == 0) {
+			for (int i = 0; i < answer.size(); i++) {
+				PostingsEntry pE = answer.get(i);
+				double queryTfIdf = getTfIdf(1, answer.size(), query.size());
+				double docTfIdf = getTfIdf(pE.getTf(), answer.size(),
+						docLengths.get(Integer.toString(pE.docID)));
+
+				pE.addValueToScore(queryTfIdf * docTfIdf);
+			}
+		}
+
+		Integer distance = 1;
+		while (queryResponses.size() != 0) {
+			PostingsList listToAddToAnswer = queryResponses.get(0);
+
+			if (rankingType == 0) {
+				for (int i = 0; i < listToAddToAnswer.size(); i++) {
+					PostingsEntry pE = listToAddToAnswer.get(i);
+					double queryTfIdf = getTfIdf(1, listToAddToAnswer.size(),
+							query.size());
+					double docTfIdf = getTfIdf(pE.getTf(),
+							listToAddToAnswer.size(),
+							docLengths.get(Integer.toString(pE.docID)));
+
+					pE.addValueToScore(queryTfIdf * docTfIdf);
+				}
+				// TODO complete stuff
+			}
+
+			if (queryType == 0) {
+				answer = intersect(answer, listToAddToAnswer);
+
+			}
+			if (queryType == 1) {
+				answer = positionalIntersect(answer, listToAddToAnswer,
+						distance);
+				distance++;
+			}
+			queryResponses.remove(0);
+
+		}
+
+		answer.sort();
+
+		return answer;
+	}
+
+	private PostingsList positionalIntersect(PostingsList p1, PostingsList p2,
+			int distance) {
+		PostingsList intersectedList = new PostingsList();
+
+		int p1index = 0;
+		int p2index = 0;
+
+		PostingsEntry tmp1;
+		PostingsEntry tmp2;
+
+		while (p1index < p1.size() && p2index < p2.size()) {
+
+			tmp1 = p1.get(p1index);
+			tmp2 = p2.get(p2index);
+
+			if (tmp1.docID == tmp2.docID) {
+				LinkedList<Integer> p1Offsets = tmp1.getOffsets();
+				LinkedList<Integer> p2Offsets = tmp2.getOffsets();
+
+				outerloop: for (int i = 0; i < p1Offsets.size(); i++) {
+					for (int j = 0; j < p2Offsets.size(); j++) {
+						if (p2Offsets.get(j) - p1Offsets.get(i) == distance) {
+							tmp1.addValueToScore(tmp2.getScore());
+							intersectedList.insert(tmp1);
+							break outerloop;
+						}
+					}
+				}
+				p1index++;
+				p2index++;
+
+			} else {
+				if (tmp1.docID < tmp2.docID) {
+					p1index++;
+				} else {
+					p2index++;
+				}
+			}
+
+		}
+		return intersectedList;
+	}
+
+	private PostingsList intersect(PostingsList p1, PostingsList p2) {
+
+		PostingsList intersectedList = new PostingsList();
+
+		int p1index = 0;
+		int p2index = 0;
+
+		while (p1index < p1.size() && p2index < p2.size()) {
+			PostingsEntry tmp1 = p1.get(p1index);
+			PostingsEntry tmp2 = p2.get(p2index);
+
+			if (tmp1.docID == tmp2.docID) {
+				tmp1.addValueToScore(tmp1.getScore());
+				intersectedList.insert(tmp1);
+				p1index++;
+				p2index++;
+			} else {
+				if (p1.get(p1index).docID < p2.get(p2index).docID) {
+					p1index++;
+				} else {
+					p2index++;
+				}
+
+			}
+		}
+
+		return intersectedList;
+	}
+
+	private Double getTfIdf(double tf, double df, double len) {
+		double idf = 0;
+		double tfIdf = 0;
+
+		idf = Math.log(totalNumberOfDocuments / df);
+		tfIdf = tf * idf / len;
+
+		return tfIdf;
+	}
+
+	private void getPostingsListFromFile(String token) {
+		String firstLetterOfToken = String.valueOf(token.charAt(0));
+		try {
+			FileInputStream fis = new FileInputStream(directoryPath
+					+ firstLetterOfToken + "/" + token);
+			ObjectInputStream ois = new ObjectInputStream(fis);
+			PostingsList injectIntoHashMap = (PostingsList) ois.readObject();
+			index.put(token, injectIntoHashMap);
+		} catch (FileNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	}
+
+	/**
+	 * No need for cleanup in a HashedIndex.
+	 */
+	@Override
+	public void cleanup() {
+		for (String key : index.keySet()) {
+			try {
+				if (key.length() < 1) {
+					continue;
+				}
+				String newDirectoryName = String.valueOf(key.charAt(0));
+				new File(directoryPath + newDirectoryName).mkdir();
+
+				FileOutputStream fout = new FileOutputStream(directoryPath
+						+ newDirectoryName + "/" + key);
+				ObjectOutputStream oos = new ObjectOutputStream(fout);
+				oos.writeObject(getPostings(key));
+				fout.close();
+				oos.close();
+			} catch (FileNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+	}
+
+}
+
